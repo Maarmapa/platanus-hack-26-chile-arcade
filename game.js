@@ -12,6 +12,8 @@ const BAD = 0xff7a7a;
 const BANANA = 0xffd23f;
 const AGENT_N = 140;
 const PART_N = 40;
+const FLY_N = 18;
+const XP_TH = [30, 80, 150, 250];
 
 // DO NOT replace existing keys. They match the cabinet wiring.
 // Local test keys may only be appended at the end of each array.
@@ -109,8 +111,32 @@ function laneY(lane, x) {
   return 300 + (LANE_Y[lane] - 300) * pull;
 }
 
-function maxHp(lv) {
+function baseHp(lv) {
   return 3 + (lv === 2 ? 2 : lv === 3 ? 4 : 0);
+}
+
+function hpBonus(side) {
+  const lv = G.ops[side].lv;
+  return (lv >= 3 ? 1 : 0) + (lv >= 5 ? 1 : 0);
+}
+
+function radOf(op) {
+  return 60 + (op.lv - 1) * 8;
+}
+
+function spdOf(op) {
+  return 260 + (op.lv - 1) * 20;
+}
+
+function reqTime(side) {
+  return 5 + (G.ops[side].lv - 1) * 0.5;
+}
+
+function xpFill(op) {
+  if (op.lv >= 5) return 1;
+  const prev = op.lv <= 1 ? 0 : XP_TH[op.lv - 2];
+  const next = XP_TH[op.lv - 1];
+  return clamp((op.xp - prev) / (next - prev), 0, 1);
 }
 
 function dmgHit(lv) {
@@ -140,8 +166,8 @@ const G = {
     [{ hp: 30 }, { hp: 30 }, { hp: 30 }],
   ],
   ops: [
-    { x: 160, y: 300, okA: 0, okR: 0, cor: 0, tgt: null, ban: 0, xp: 0, lv: 1 },
-    { x: 640, y: 300, okA: 0, okR: 0, cor: 0, tgt: null, ban: 0, xp: 0, lv: 1 },
+    { x: 160, y: 300, okA: 0, okR: 0, cor: 0, tgt: null, ban: 0, xp: 0, lv: 1, faltan: 0, popT: 0 },
+    { x: 640, y: 300, okA: 0, okR: 0, cor: 0, tgt: null, ban: 0, xp: 0, lv: 1, faltan: 0, popT: 0 },
   ],
   screen: 'play',
   timeLeft: 180,
@@ -150,6 +176,11 @@ const G = {
   shake: 0,
   t: 0,
   seq: 0,
+  flies: [],
+  pulses: [
+    { on: 0, x: 0, y: 0, t: 0, side: 0 },
+    { on: 0, x: 0, y: 0, t: 0, side: 1 },
+  ],
   ui: null,
   world: null,
   glow: null,
@@ -159,7 +190,7 @@ const G = {
 function blankAgent() {
   return {
     on: 0, side: 0, lane: 0, x: 0, y: 0, oy: 0,
-    lv: 1, hp: 3, mhp: 3, bad: 0, slow: 0,
+    lv: 1, hp: 3, mhp: 3, bonus: 0, bad: 0, slow: 0,
     req: 0, reqMax: 5, mis: 0, cd: 0, flash: 0,
   };
 }
@@ -168,8 +199,13 @@ function blankPart() {
   return { on: 0, x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, color: 0xffffff, r: 2 };
 }
 
+function blankFly() {
+  return { on: 0, x: 0, y: 0, sx: 0, sy: 0, tx: 0, ty: 0, t: 0 };
+}
+
 for (let i = 0; i < AGENT_N; i++) G.agents.push(blankAgent());
 for (let i = 0; i < PART_N; i++) G.parts.push(blankPart());
+for (let i = 0; i < FLY_N; i++) G.flies.push(blankFly());
 
 function living(side) {
   let n = 0;
@@ -210,6 +246,74 @@ function corrupt(a) {
   burst(a.x, a.y, BAD, 7);
 }
 
+function spreadFrom(src) {
+  let b1 = null;
+  let d1 = 2500;
+  let b2 = null;
+  let d2 = 2500;
+  const A = G.agents;
+  for (let i = 0; i < A.length; i++) {
+    const b = A[i];
+    if (!b.on || b.bad || b === src || b.side !== src.side || b.lv >= 3) continue;
+    const dx = b.x - src.x;
+    const dy = b.y - src.y;
+    const d = dx * dx + dy * dy;
+    if (d < d1) {
+      b2 = b1;
+      d2 = d1;
+      b1 = b;
+      d1 = d;
+    } else if (d < d2) {
+      b2 = b;
+      d2 = d;
+    }
+  }
+  if (b1) corrupt(b1);
+  if (b2) corrupt(b2);
+}
+
+function addXp(side, n) {
+  const op = G.ops[side];
+  const before = op.lv;
+  op.xp = Math.max(0, op.xp + n);
+  let lv = op.lv;
+  while (lv < 5 && op.xp >= XP_TH[lv - 1]) lv++;
+  if (lv > before) {
+    op.lv = lv;
+    op.popT = 1.7;
+  }
+}
+
+function grantBanana(side, n, x, y) {
+  G.ops[side].ban += n;
+  const tx = side === 0 ? 100 : W - 100;
+  const ty = 16;
+  let left = n > 2 ? 2 : n;
+  const F = G.flies;
+  for (let i = 0; i < F.length && left > 0; i++) {
+    const f = F[i];
+    if (f.on) continue;
+    f.on = 1;
+    f.sx = x + (left - 1) * 8;
+    f.sy = y;
+    f.x = f.sx;
+    f.y = f.sy;
+    f.tx = tx;
+    f.ty = ty;
+    f.t = 0;
+    left--;
+  }
+}
+
+function drawBanana(g, x, y, scale) {
+  const s = scale || 1;
+  g.lineStyle(Math.max(1.5, 2 * s), BANANA, 1);
+  g.beginPath();
+  g.arc(x, y + s, 5.2 * s, 0.45, 2.55, false);
+  g.strokePath();
+  g.lineBetween(x + 2.2 * s, y - 3.2 * s, x + 4.2 * s, y - 5.4 * s);
+}
+
 function dirOf(a) {
   const d = a.side === 0 ? 1 : -1;
   return a.bad ? -d : d;
@@ -224,6 +328,7 @@ function spawnOne(side, lane, x) {
   }
   if (!a) return null;
   const lv = 1;
+  const bonus = hpBonus(side);
   a.on = 1;
   a.side = side;
   a.lane = lane;
@@ -231,7 +336,8 @@ function spawnOne(side, lane, x) {
   a.oy = ((G.seq++ % 5) - 2) * 3;
   a.y = laneY(lane, x) + a.oy;
   a.lv = lv;
-  a.mhp = maxHp(lv);
+  a.bonus = bonus;
+  a.mhp = baseHp(lv) + bonus;
   a.hp = a.mhp;
   a.bad = 0;
   a.slow = 0;
@@ -303,6 +409,7 @@ function impact(a) {
     G.shake = Math.min(8, G.shake + 3);
     burst(a.x, a.y, COL[def], 8);
   }
+  if (!a.bad) grantBanana(a.side, 1, a.x, a.y);
   a.on = 0;
   a.req = 0;
 }
@@ -360,7 +467,7 @@ function rollRequests(dt) {
     if (!a.on || a.bad || a.req > 0) continue;
     if (open[a.side] >= 6) continue;
     if (Math.random() >= 0.05 * dt) continue;
-    a.reqMax = 5;
+    a.reqMax = reqTime(a.side);
     a.req = a.reqMax;
     a.mis = Math.random() < pMis ? 1 : 0;
     open[a.side]++;
@@ -369,8 +476,9 @@ function rollRequests(dt) {
 
 function nearestReq(side) {
   const op = G.ops[side];
+  const rad = radOf(op);
   let best = null;
-  let bestD = 3600;
+  let bestD = rad * rad;
   const A = G.agents;
   for (let i = 0; i < A.length; i++) {
     const a = A[i];
@@ -391,11 +499,13 @@ function actApprove(side) {
   if (!a || !a.on || a.req <= 0 || a.bad) return;
   if (a.mis) {
     corrupt(a);
+    spreadFrom(a);
+    addXp(side, -5);
     return;
   }
   if (a.lv < 3) {
     a.lv += 1;
-    a.mhp = maxHp(a.lv);
+    a.mhp = baseHp(a.lv) + (a.bonus || 0);
     a.hp = a.mhp;
   } else {
     a.hp = a.mhp;
@@ -403,22 +513,94 @@ function actApprove(side) {
   a.req = 0;
   a.flash = 0.2;
   G.ops[side].okA += 1;
+  addXp(side, 10);
+  grantBanana(side, 1, a.x, a.y);
   burst(a.x, a.y, COL[side], 6);
+}
+
+function purge(side, a) {
+  G.ops[side].okR += 1;
+  addXp(side, 15);
+  grantBanana(side, 2, a.x, a.y);
+  burst(a.x, a.y, BANANA, 6);
+  a.on = 0;
+  a.req = 0;
 }
 
 function actReject(side) {
   const a = G.ops[side].tgt;
   if (!a || !a.on || a.req <= 0 || a.bad) return;
   if (a.mis) {
-    G.ops[side].okR += 1;
-    burst(a.x, a.y, BANANA, 6);
-    a.on = 0;
-    a.req = 0;
+    purge(side, a);
     return;
   }
   a.slow = 3;
   a.req = 0;
   a.flash = 0.12;
+  addXp(side, -2);
+}
+
+function nearestLane(y) {
+  let best = 0;
+  let bd = 1e9;
+  for (let i = 0; i < 3; i++) {
+    const d = Math.abs(LANE_Y[i] - y);
+    if (d < bd) {
+      bd = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+function actFork(side) {
+  const op = G.ops[side];
+  if (op.ban < 5) {
+    op.faltan = 1.25;
+    return;
+  }
+  const lane = nearestLane(op.y);
+  const dir = side === 0 ? 1 : -1;
+  const base = side === 0 ? 96 : 704;
+  let made = 0;
+  for (let k = 0; k < 3; k++) {
+    if (spawnOne(side, lane, base + dir * k * 14)) made++;
+  }
+  if (!made) return;
+  op.ban -= 5;
+  burst(base, laneY(lane, base), COL[side], 8);
+}
+
+function cure(a) {
+  if (!a.on || !a.bad) return;
+  a.bad = 0;
+  a.flash = 0.22;
+  burst(a.x, a.y, COL[a.side], 5);
+}
+
+function actAudit(side) {
+  const op = G.ops[side];
+  if (op.ban < 8) {
+    op.faltan = 1.25;
+    return;
+  }
+  op.ban -= 8;
+  const pulse = G.pulses[side];
+  pulse.on = 1;
+  pulse.x = op.x;
+  pulse.y = op.y;
+  pulse.t = 0;
+  pulse.side = side;
+  const A = G.agents;
+  for (let i = 0; i < A.length; i++) {
+    const a = A[i];
+    if (!a.on || a.side !== side) continue;
+    const dx = a.x - op.x;
+    const dy = a.y - op.y;
+    if (dx * dx + dy * dy > 14400) continue;
+    if (a.bad) cure(a);
+    else if (a.req > 0 && a.mis) purge(side, a);
+  }
 }
 
 function stepOps(dt) {
@@ -433,12 +615,48 @@ function stepOps(dt) {
     if (held[pre + 'D']) vy += 1;
     const mag = Math.hypot(vx, vy);
     if (mag > 0) {
-      op.x = clamp(op.x + (vx / mag) * 260 * dt, 16, W - 16);
-      op.y = clamp(op.y + (vy / mag) * 260 * dt, 42, H - 24);
+      const spd = spdOf(op);
+      op.x = clamp(op.x + (vx / mag) * spd * dt, 16, W - 16);
+      op.y = clamp(op.y + (vy / mag) * spd * dt, 42, H - 24);
     }
     op.tgt = nearestReq(s);
     if (edge[pre + '1']) actApprove(s);
     if (edge[pre + '2']) actReject(s);
+    if (edge[pre + '3']) actFork(s);
+    if (edge[pre + '4']) actAudit(s);
+  }
+}
+
+function stepFlies(dt) {
+  const F = G.flies;
+  for (let i = 0; i < F.length; i++) {
+    const f = F[i];
+    if (!f.on) continue;
+    f.t += dt / 0.45;
+    if (f.t >= 1) {
+      f.on = 0;
+      continue;
+    }
+    const k = 1 - (1 - f.t) * (1 - f.t);
+    f.x = f.sx + (f.tx - f.sx) * k;
+    f.y = f.sy + (f.ty - f.sy) * k - Math.sin(f.t * Math.PI) * 28;
+  }
+}
+
+function stepPulses(dt) {
+  for (let i = 0; i < 2; i++) {
+    const p = G.pulses[i];
+    if (!p.on) continue;
+    p.t += dt / 0.32;
+    if (p.t >= 1) p.on = 0;
+  }
+}
+
+function decayUi(dt) {
+  for (let s = 0; s < 2; s++) {
+    const op = G.ops[s];
+    op.faltan = Math.max(0, op.faltan - dt);
+    op.popT = Math.max(0, op.popT - dt);
   }
 }
 
@@ -455,6 +673,10 @@ function stepParts(dt) {
     p.x += p.vx * dt;
     p.y += p.vy * dt;
   }
+}
+
+function scoreOf(i) {
+  return G.ops[i].ban * 10 + G.ops[i].xp + G.cores[i].hp * 5 + (G.winner === i ? 500 : 0);
 }
 
 function winnerOf() {
@@ -488,6 +710,8 @@ function step(dt) {
   rollRequests(dt);
   stepOps(dt);
   stepParts(dt);
+  stepFlies(dt);
+  stepPulses(dt);
   G.timeLeft -= dt;
   if (G.timeLeft < 0) G.timeLeft = 0;
   if (G.timeLeft <= 0 || G.cores[0].hp <= 0 || G.cores[1].hp <= 0) finish();
@@ -611,11 +835,12 @@ function drawWorld() {
   for (let s = 0; s < 2; s++) {
     const op = G.ops[s];
     const hot = op.tgt && op.tgt.on && op.tgt.req > 0 ? op.tgt : null;
+    const rad = radOf(op);
     glow.fillStyle(COL[s], 0.18);
     glow.fillCircle(op.x, op.y, 16);
     world.lineStyle(1, COL[s], 0.16);
-    world.strokeCircle(op.x, op.y, 60);
-    world.lineStyle(2, COL[s], 1);
+    world.strokeCircle(op.x, op.y, rad);
+    world.lineStyle(op.lv >= 3 ? 3 : 2, COL[s], 1);
     world.strokeCircle(op.x, op.y, 9);
     world.lineBetween(op.x - 6, op.y, op.x + 6, op.y);
     world.lineBetween(op.x, op.y - 6, op.x, op.y + 6);
@@ -641,6 +866,30 @@ function drawWorld() {
     world.fillCircle(p.x, p.y, p.r);
   }
 
+  for (let i = 0; i < 2; i++) {
+    const p = G.pulses[i];
+    if (!p.on) continue;
+    world.lineStyle(2, COL[p.side], 1 - p.t);
+    world.strokeCircle(p.x, p.y, 16 + 104 * p.t);
+  }
+
+  const F = G.flies;
+  for (let i = 0; i < F.length; i++) {
+    if (F[i].on) drawBanana(world, F[i].x, F[i].y, 0.9);
+  }
+
+  for (let s = 0; s < 2; s++) {
+    const op = G.ops[s];
+    const right = s === 1;
+    const barX = right ? 552 : 184;
+    hud.fillStyle(0x1c240c, 1);
+    hud.fillRect(barX, 16, 64, 6);
+    hud.fillStyle(COL[s], 1);
+    hud.fillRect(barX, 16, 64 * xpFill(op), 6);
+    drawBanana(hud, right ? 700 : 100, 16, 1);
+    if (op.faltan > 0) drawBanana(hud, right ? 708 : 72, 40, 0.8);
+  }
+
   if (G.screen === 'over') {
     hud.fillStyle(0x070a02, 0.78);
     hud.fillRect(150, 145, 500, 300);
@@ -656,8 +905,11 @@ function overBody() {
     s += 'P' + (i + 1);
     s += '  APR ' + o.okA;
     s += '  RCH ' + o.okR;
-    s += '  COR ' + o.cor;
-    s += '  NUC ' + G.cores[i].hp + '\n';
+    s += '  COR ' + o.cor + '\n';
+    s += '    BAN ' + o.ban;
+    s += '  NV ' + o.lv;
+    s += '  NUC ' + G.cores[i].hp;
+    s += '  PTS ' + scoreOf(i) + '\n';
   }
   s += '\nSTART  OTRA VEZ';
   return s;
@@ -667,8 +919,21 @@ function syncUi() {
   const ui = G.ui;
   ui.hp0.setText('P1  ' + G.cores[0].hp);
   ui.hp1.setText(G.cores[1].hp + '  P2');
+  ui.ban0.setText(String(G.ops[0].ban));
+  ui.ban1.setText(String(G.ops[1].ban));
+  ui.lv0.setText('N' + G.ops[0].lv);
+  ui.lv1.setText('N' + G.ops[1].lv);
   ui.timer.setText(clock(G.timeLeft));
   ui.timer.setColor(G.timeLeft <= 30 ? '#ff7a7a' : '#f4f7e4');
+  ui.faltan0.setVisible(G.ops[0].faltan > 0);
+  ui.faltan1.setVisible(G.ops[1].faltan > 0);
+  for (let s = 0; s < 2; s++) {
+    const pop = s === 0 ? ui.pop0 : ui.pop1;
+    const op = G.ops[s];
+    const alpha = op.popT <= 0 ? 0 : op.popT > 1 ? 1 : op.popT;
+    pop.setAlpha(alpha);
+    pop.setText('NIVEL ' + op.lv);
+  }
   const over = G.screen === 'over';
   ui.over.setVisible(over);
   if (over) {
@@ -717,6 +982,10 @@ function resetMatch() {
   for (let i = 0; i < A.length; i++) A[i].on = 0;
   const P = G.parts;
   for (let i = 0; i < P.length; i++) P[i].on = 0;
+  const F = G.flies;
+  for (let i = 0; i < F.length; i++) F[i].on = 0;
+  G.pulses[0].on = 0;
+  G.pulses[1].on = 0;
   G.cores[0].hp = 100;
   G.cores[1].hp = 100;
   for (let s = 0; s < 2; s++) {
@@ -731,6 +1000,8 @@ function resetMatch() {
     op.ban = 0;
     op.xp = 0;
     op.lv = 1;
+    op.faltan = 0;
+    op.popT = 0;
   }
   G.timeLeft = 180;
   G.waveT = 6;
@@ -765,13 +1036,25 @@ function create() {
   G.hud = this.add.graphics();
   G.hud.setDepth(3);
   G.ui = {
-    hp0: label(this, 16, 10, 'P1  100', 16, COL_CSS[0], 0, 0),
-    hp1: label(this, W - 16, 10, '100  P2', 16, COL_CSS[1], 1, 0),
+    hp0: label(this, 12, 8, 'P1  100', 16, COL_CSS[0], 0, 0),
+    hp1: label(this, W - 12, 8, '100  P2', 16, COL_CSS[1], 1, 0),
+    ban0: label(this, 112, 8, '0', 16, '#ffd23f', 0, 0),
+    ban1: label(this, W - 112, 8, '0', 16, '#ffd23f', 1, 0),
+    lv0: label(this, 156, 8, 'N1', 16, COL_CSS[0], 0, 0),
+    lv1: label(this, W - 156, 8, 'N1', 16, COL_CSS[1], 1, 0),
     timer: label(this, W / 2, 8, '3:00', 22, '#f4f7e4', 0.5, 0),
-    help: label(this, W / 2, H - 10, 'B1 APRUEBA    B2 RECHAZA', 12, '#8b9468', 0.5, 1),
-    over: label(this, W / 2, 188, '', 18, '#f4f7e4', 0.5, 0),
+    help: label(this, W / 2, H - 8, 'B1 APRUEBA   B2 RECHAZA   B3 FORK 5   B4 AUDITORÍA 8', 11, '#8b9468', 0.5, 1),
+    faltan0: label(this, 12, 32, 'FALTAN', 12, '#ffd23f', 0, 0),
+    faltan1: label(this, W - 12, 32, 'FALTAN', 12, '#ffd23f', 1, 0),
+    pop0: label(this, 210, 250, '', 28, COL_CSS[0], 0.5, 0.5),
+    pop1: label(this, W - 210, 250, '', 28, COL_CSS[1], 0.5, 0.5),
+    over: label(this, W / 2, 175, '', 15, '#f4f7e4', 0.5, 0),
   };
   G.ui.over.setVisible(false);
+  G.ui.faltan0.setVisible(false);
+  G.ui.faltan1.setVisible(false);
+  G.ui.pop0.setAlpha(0);
+  G.ui.pop1.setAlpha(0);
   resetMatch();
 }
 
@@ -781,6 +1064,12 @@ function update(time, delta) {
   takeEdges();
   if (G.screen === 'play') step(dt);
   else if (G.screen === 'over' && (edge.START1 || edge.START2 || edge.P1_1 || edge.P2_1)) resetMatch();
+  if (G.screen !== 'play') {
+    stepParts(dt);
+    stepFlies(dt);
+    stepPulses(dt);
+  }
+  decayUi(dt);
   G.shake = Math.max(0, G.shake - dt * 16);
   drawWorld();
   syncUi();
