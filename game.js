@@ -166,7 +166,7 @@ function sfxCore() {
 
 const RANK_KEY = 'enjambre-rank';
 const AZ = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-const MENU = ['1 JUGADOR', '2 JUGADORES', 'RECORDS'];
+const MENU = ['1 JUGADOR', '2 JUGADORES', 'RÉCORDS'];
 
 function storage() {
   if (window.platanusArcadeStorage) return window.platanusArcadeStorage;
@@ -332,7 +332,6 @@ const G = {
   winner: -1,
   shake: 0,
   t: 0,
-  seq: 0,
   flies: [],
   pulses: [
     { on: 0, x: 0, y: 0, t: 0, side: 0 },
@@ -348,7 +347,7 @@ function blankAgent() {
   return {
     on: 0, side: 0, lane: 0, x: 0, y: 0, oy: 0,
     lv: 1, hp: 3, mhp: 3, bonus: 0, bad: 0, slow: 0,
-    req: 0, reqMax: 5, mis: 0, cd: 0, flash: 0,
+    req: 0, reqMax: 5, mis: 0, cd: 0, flash: 0, go: 0,
   };
 }
 
@@ -363,6 +362,10 @@ function blankFly() {
 for (let i = 0; i < AGENT_N; i++) G.agents.push(blankAgent());
 for (let i = 0; i < PART_N; i++) G.parts.push(blankPart());
 for (let i = 0; i < FLY_N; i++) G.flies.push(blankFly());
+
+const hitWho = new Array(AGENT_N);
+const hitDmg = new Array(AGENT_N);
+let hitN = 0;
 
 function living(side) {
   let n = 0;
@@ -493,7 +496,9 @@ function spawnOne(side, lane, x) {
   a.side = side;
   a.lane = lane;
   a.x = x;
-  a.oy = ((G.seq++ % 5) - 2) * 3;
+  const home = side === 0 ? 96 : 704;
+  const slot = Math.round(Math.abs(x - home) / 14) % 3;
+  a.oy = (slot - 1) * 4;
   a.y = laneY(lane, x) + a.oy;
   a.lv = lv;
   a.bonus = bonus;
@@ -579,6 +584,7 @@ function stepAgent(a, dt) {
   a.cd = Math.max(0, a.cd - dt);
   a.slow = Math.max(0, a.slow - dt);
   a.flash = Math.max(0, a.flash - dt);
+  a.go = 0;
   if (a.req > 0) {
     a.req -= dt;
     if (a.req <= 0) {
@@ -591,17 +597,35 @@ function stepAgent(a, dt) {
   const foe = nearestFoe(a);
   if (foe) {
     if (a.cd <= 0) {
-      foe.hp -= dmgHit(a.lv);
-      foe.flash = 0.08;
+      hitWho[hitN] = foe;
+      hitDmg[hitN] = dmgHit(a.lv);
+      hitN++;
       a.cd = 0.6;
-      if (foe.hp <= 0) {
-        foe.on = 0;
-        foe.req = 0;
-        burst(foe.x, foe.y, foe.bad ? BAD : COL[foe.side], 4);
-      }
+      foe.flash = 0.08;
     }
     return;
   }
+  a.go = 1;
+}
+
+function resolveHits() {
+  for (let i = 0; i < hitN; i++) {
+    const foe = hitWho[i];
+    if (!foe.on) continue;
+    foe.hp -= hitDmg[i];
+  }
+  const A = G.agents;
+  for (let i = 0; i < A.length; i++) {
+    const foe = A[i];
+    if (!foe.on || foe.hp > 0) continue;
+    foe.on = 0;
+    foe.req = 0;
+    burst(foe.x, foe.y, foe.bad ? BAD : COL[foe.side], 4);
+  }
+}
+
+function moveReady(a, dt) {
+  if (!a.on || !a.go) return;
   const dir = dirOf(a);
   const spd = 70 * (a.slow > 0 ? 0.5 : 1);
   a.x += dir * spd * dt;
@@ -1048,10 +1072,13 @@ function step(dt) {
     spawnWave();
     G.waveT += 6;
   }
+  hitN = 0;
   const A = G.agents;
   for (let i = 0; i < A.length; i++) {
     if (A[i].on) stepAgent(A[i], dt);
   }
+  resolveHits();
+  for (let i = 0; i < A.length; i++) moveReady(A[i], dt);
   rollRequests(dt);
   stepOps(dt);
   stepParts(dt);
@@ -1479,7 +1506,7 @@ function create() {
     h2: label(this, W / 2, 212, 'LOS QUE LLEGAN AL NÚCLEO RIVAL SE VUELVEN PLÁTANOS.', 12, '#ffd23f', 0.5, 0),
     hint: label(this, W / 2, 412, 'ARRIBA Y ABAJO. START O B1.', 13, '#d5dcc0', 0.5, 0),
     demo: label(this, W / 2, 470, 'DEMO', 12, '#8b9468', 0.5, 0),
-    recT: label(this, W / 2, 90, 'RECORDS', 32, '#ffd23f', 0.5, 0.5),
+    recT: label(this, W / 2, 90, 'RÉCORDS', 32, '#ffd23f', 0.5, 0.5),
     recB: label(this, W / 2, 160, '', 22, '#f4f7e4', 0.5, 0),
     recH: label(this, W / 2, 470, 'B2 O START VOLVER', 14, '#d5dcc0', 0.5, 0),
     pauseT: label(this, W / 2, 248, 'PAUSA', 36, '#f4f7e4', 0.5, 0.5),
@@ -1490,7 +1517,7 @@ function create() {
   G.ui.menu = [
     label(this, W / 2, 278, '1 JUGADOR', 22, '#d5dcc0', 0.5, 0.5),
     label(this, W / 2, 318, '2 JUGADORES', 22, '#d5dcc0', 0.5, 0.5),
-    label(this, W / 2, 358, 'RECORDS', 22, '#d5dcc0', 0.5, 0.5),
+    label(this, W / 2, 358, 'RÉCORDS', 22, '#d5dcc0', 0.5, 0.5),
   ];
   G.ui.nameL = [
     label(this, W / 2 - 76, 300, 'A', 42, '#f4f7e4', 0.5, 0.5),
